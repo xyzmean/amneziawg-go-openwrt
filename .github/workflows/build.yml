@@ -1,0 +1,93 @@
+name: Build AmneziaWG Go
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: "OpenWrt version"
+        type: string
+        required: true
+        default: "SNAPSHOT"
+      openwrt_arch:
+        description: "OpenWrt arch"
+        type: string
+        required: true
+        default: "aarch64_cortex-a53"
+      openwrt_target:
+        description: "OpenWrt target"
+        type: string
+        required: true
+        default: "mediatek"
+      openwrt_subtarget:
+        description: "OpenWrt subtarget"
+        type: string
+        required: true
+        default: "filogic"
+
+jobs:
+  build:
+    name: "Build ${{ inputs.openwrt_arch }} - ${{ inputs.openwrt_target }}/${{ inputs.openwrt_subtarget }}"
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout this repository
+      uses: actions/checkout@v4
+
+    - name: Checkout OpenWrt Packages (for latest golang)
+      uses: actions/checkout@v4
+      with:
+        path: packages
+        repository: openwrt/packages
+
+    - name: Download and prepare SDK
+      run: |
+        set -e -x
+        if [ "${{ inputs.openwrt_version }}" = "SNAPSHOT" ]; then
+          base_url="https://downloads.openwrt.org/snapshots/targets/${{ inputs.openwrt_target }}/${{ inputs.openwrt_subtarget }}/"
+        else
+          base_url="https://downloads.openwrt.org/releases/${{ inputs.openwrt_version }}/targets/${{ inputs.openwrt_target }}/${{ inputs.openwrt_subtarget }}/"
+        fi
+        sdk_url=$(curl -s "${base_url}" | grep -oP 'href="openwrt-sdk[^"]+\.tar\.(zst|xz)"' | sed -e 's/href="//' -e 's/"$//' | head -n1)
+        if [[ -z "$sdk_url" ]]; then
+          echo "SDK file not found."
+          exit 1
+        fi
+        curl -fsLO "$base_url$sdk_url"
+        file_name=$(basename "$sdk_url")
+        tar -xf "$file_name"
+        rm -f *.tar.zst *.tar.xz
+        mv openwrt-sdk* openwrt
+
+        # Create package directory and copy files
+        mkdir -p openwrt/package/amneziawg-go
+        cp Makefile openwrt/package/amneziawg-go/
+
+        # Update golang to latest version
+        rm -rf openwrt/feeds/packages/lang/golang
+        cp -r packages/lang/golang openwrt/feeds/packages/lang/
+
+        # Update feeds
+        ./openwrt/scripts/feeds update -a
+        ./openwrt/scripts/feeds install -a
+
+        # Configure
+        curl -fsL "$base_url/config.buildinfo" > openwrt/.config
+        echo "CONFIG_PACKAGE_amneziawg-go=y" >> openwrt/.config
+        make -C openwrt defconfig
+
+    - name: Build package
+      run: |
+        set -e -x
+        cd openwrt
+        make package/amneziawg-go/{clean,download,prepare,compile} -j $(nproc) V=s
+
+    - name: Prepare artifacts
+      run: |
+        set -e -x
+        mkdir release
+        find "openwrt/bin/packages/${{ inputs.openwrt_arch }}" -name "amneziawg-go*.ipk" -exec cp {} release \;
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: amneziawg-go-${{ inputs.openwrt_version }}_${{ inputs.openwrt_arch }}
+        path: release/*
